@@ -105,6 +105,20 @@ def cd(vfs, path):
     except Exception as e:
         return str(e)
 
+def cat(vfs, file_name):
+    exact_file = os.path.join(vfs.current_path, file_name)
+
+    if os.path.isfile(exact_file):
+        return vfs.read_file(file_name)
+
+    possible_extensions = ['.txt', '.log', '.conf']
+    for ext in possible_extensions:
+        file_with_ext = os.path.join(vfs.current_path, file_name + ext)
+        if os.path.isfile(file_with_ext):
+            return vfs.read_file(file_name + ext)
+
+    return "File not found"
+
 def run_shell(hostname, vfs_path, log_path):
     vfs = VirtualFileSystem(vfs_path)
 
@@ -137,14 +151,14 @@ def run_shell(hostname, vfs_path, log_path):
                     output = cat(vfs, file_name)
                 except ValueError:
                     output = "Please specify a file."
-            elif command.startswith('chown'):
+            elif command.startswith('rmdir'):
                 try:
                     _, file_name, new_owner = command.split(maxsplit=2)
-                    output = chown(vfs, file_name, new_owner)
+                    output = "rmdir"
                 except ValueError:
                     output = "Usage: chown <file> <new_owner>"
-            elif command == 'date':
-                output = date()
+            elif command == 'head':
+                output = "head"
             elif command == 'exit':
                 window.quit()
             else:
