@@ -1,0 +1,5 @@
+{
+  "hostname": "MyVirtualMachine",
+  "vfs_path": "vfs.zip",
+  "log_path": "log.xml"
+}
