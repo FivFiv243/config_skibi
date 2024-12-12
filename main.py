@@ -5,12 +5,20 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import tkinter as tk
 from tkinter import scrolledtext
+from tempfile import TemporaryDirectory
 
 # Чтение конфигурационного файла JSON
 def read_config(config_path):
-    with open(config_path, 'r') as file:
-        config = json.load(file)
-    return config['hostname'], config['vfs_path'], config['log_path']
+    try:
+        with open(config_path, 'r') as file:
+            config = json.load(file)
+        return config['hostname'], config['vfs_path'], config['log_path']
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    except KeyError as e:
+        raise ValueError(f"Missing key in configuration file: {e}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Error parsing configuration file: {e}")
 
 # Логирование действий в XML
 def log_action(log_path, action):
@@ -35,16 +43,17 @@ def log_action(log_path, action):
 # Класс для работы с виртуальной файловой системой
 class VirtualFileSystem:
     def __init__(self, zip_path):
+        self.temp_dir = TemporaryDirectory()
         self.root = "MyVirtualMachine"
         self.current_path = self.root
         if os.path.exists(zip_path):
-            self.extract_zip(zip_path)
+            self.archive = zipfile.ZipFile(zip_path, 'a')
         else:
             raise FileNotFoundError(f"ZIP file not found: {zip_path}")
 
-    def extract_zip(self, zip_path):
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(self.root)
+    def __del__(self):
+        self.archive.close()
+        self.temp_dir.cleanup()
 
     def list_directory(self):
         items = []
