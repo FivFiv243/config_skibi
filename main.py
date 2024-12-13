@@ -1,199 +1,207 @@
-import json
 import os
 import zipfile
-import xml.etree.ElementTree as ET
-from datetime import datetime
+import json
 import tkinter as tk
 from tkinter import scrolledtext
 from tempfile import TemporaryDirectory
 
-# Чтение конфигурационного файла JSON
-def read_config(config_path):
+
+def read_config(path):
     try:
-        with open(config_path, 'r') as file:
-            config = json.load(file)
-        return config['hostname'], config['vfs_path'], config['log_path']
+        with open(path, 'r') as f:
+            config = json.load(f)
+        return config['vfs_path']
     except FileNotFoundError:
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        raise FileNotFoundError(f"Configuration file not found: {path}")
     except KeyError as e:
         raise ValueError(f"Missing key in configuration file: {e}")
     except json.JSONDecodeError as e:
         raise ValueError(f"Error parsing configuration file: {e}")
 
-# Логирование действий в XML
-def log_action(log_path, action):
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    if os.path.exists(log_path) and os.path.getsize(log_path) > 0:
-        try:
-            tree = ET.parse(log_path)
-            root = tree.getroot()
-        except ET.ParseError:
-            root = ET.Element("log")
-    else:
-        root = ET.Element("log")
-
-    event = ET.SubElement(root, "event")
-    ET.SubElement(event, "action").text = action
-    ET.SubElement(event, "timestamp").text = now
-
-    tree = ET.ElementTree(root)
-    tree.write(log_path)
-
-# Класс для работы с виртуальной файловой системой
-class VirtualFileSystem:
+class Shell:
     def __init__(self, zip_path):
         self.temp_dir = TemporaryDirectory()
-        self.root = "MyVirtualMachine"
-        self.current_path = self.root
-        if os.path.exists(zip_path):
-            self.archive = zipfile.ZipFile(zip_path, 'a')
-        else:
-            raise FileNotFoundError(f"ZIP file not found: {zip_path}")
+        self.zip_path = zip_path
+        self.cwd = "/"  # Root of the virtual file system
+        self.archive = zipfile.ZipFile(zip_path, 'a')  # Open ZIP archive
+
+    def get_relative_path(self):
+        return self.cwd
 
     def __del__(self):
         self.archive.close()
         self.temp_dir.cleanup()
 
-    def list_directory(self):
-        items = []
-        for item in os.listdir(self.current_path):
-            item_path = os.path.join(self.current_path, item)
-            stats = os.stat(item_path)
-            size = stats.st_size
-            modified_time = datetime.fromtimestamp(stats.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-            item_type = 'Directory' if os.path.isdir(item_path) else 'File'
-            items.append(f"{item_type: <10} {size: <10} {modified_time} {item}")
-        return "\n".join(items)
+    def run_command(self, command):
+        parts = command.split()
+        if not parts:
+            return "No command entered"
 
-    def change_directory(self, path):
-        if path == '..':
-            if self.current_path != self.root:
-                self.current_path = os.path.dirname(self.current_path)
-            else:
-                raise FileNotFoundError("You are already at the root directory")
+        cmd = parts[0]
+        args = parts[1:]
+
+        if cmd == "ls":
+            return self.ls(args)
+        elif cmd == "cd":
+            return self.cd(args[0] if args else "/")
+        elif cmd == "cat":
+            return self.cat(args)
+        elif cmd == "rmdir":
+            return self.rmdir(args)
+        elif cmd == "head":
+            return self.head(args)
+        elif cmd == "exit":
+            return self.exit()
         else:
-            new_path = os.path.join(self.current_path, path)
-            if os.path.isdir(new_path):
-                self.current_path = new_path
-            else:
-                raise FileNotFoundError("Directory not found")
+            return "Command not found"
 
-    def get_relative_path(self):
-        return os.path.relpath(self.current_path, self.root).replace('\\', '/')
+    def ls(self, args):
+        detailed = "-l" in args
+        entries = self.archive.namelist()
 
-    def read_file(self, file_name):
-        file_path = os.path.join(self.current_path, file_name)
-        if os.path.isfile(file_path):
-            try:
-                with open(file_path, 'r', encoding='utf-8') as file:
-                    return file.read()
-            except UnicodeDecodeError:
-                return "Error reading file: unsupported characters"
+        dirs = set()
+        files = set()
+
+        for entry in entries:
+            if entry.startswith(self.cwd.strip("/")):
+                rel_path = entry[len(self.cwd.strip("/")):].strip("/")
+                if "/" in rel_path:
+                    dirs.add(rel_path.split("/")[0])
+                elif rel_path:
+                    files.add(rel_path)
+
+        if detailed:
+            result = []
+            for entry in sorted(dirs | files):
+                if entry in dirs:
+                    result.append(f"drwxr-xr-x 0 {entry}")
+                else:
+                    info = next((i for i in self.archive.infolist() if i.filename == f"{self.cwd.strip('/')}/{entry}"), None)
+                    size = info.file_size if info else 0
+                    result.append(f"-rw-r--r-- {size} {entry}")
+            return "\n".join(result)
         else:
-            raise FileNotFoundError("File not found")
+            return "\n".join(sorted(dirs | files))
 
-    def remove_directory(self, dirname):
-        dir_path = os.path.join(self.current_path, dirname)
-        if os.path.isdir(dir_path):
-            os.rmdir(dir_path)
-            return f"Directory '{dirname}' removed."
+    def cd(self, path):
+        if not path:
+            path = "/"
+
+        if path == "..":
+            if self.cwd == "/":
+                return "Already at root directory"
+            new_path = '/'.join(self.cwd.strip('/').split('/')[:-1])
+            if new_path == "":
+                new_path = "/"
+            self.cwd = "/" + new_path.lstrip("/")
+            return ""
+
+        new_path = os.path.normpath(os.path.join(self.cwd.strip("/"), path)).replace("\\", "/")
+
+        entries = self.archive.namelist()
+        matched_dirs = [entry for entry in entries if entry.startswith(new_path + "/")]
+
+        if matched_dirs:
+            self.cwd = "/" + new_path.lstrip("/")
+            return ""
         else:
-            raise FileNotFoundError(f"Directory '{dirname}' not found.")
+            return f"No such directory: {path}"
 
-    def read_head(self, filename, n=10):
-        file_path = os.path.join(self.current_path, filename)
-        if os.path.isfile(file_path):
-            with open(file_path, 'r', encoding='utf-8') as file:
-                return "".join(file.readlines()[:n])
-        raise FileNotFoundError(f"File '{filename}' not found.")
+    def cat(self, args):
+        if not args:
+            return "Usage: cat <file>"
 
-# Обработчики команд
-def ls(vfs):
-    try:
-        return vfs.list_directory()
-    except Exception as e:
-        return str(e)
+        file_path = os.path.normpath(os.path.join(self.cwd.strip("/"), args[0])).replace("\\", "/")
 
-def cd(vfs, path):
-    if path.startswith('...') or '...' in path:
-        return "Error: More than two consecutive dots are not allowed in the directory path."
-    try:
-        vfs.change_directory(path)
-        return f"Changed directory to {vfs.get_relative_path()}"
-    except Exception as e:
-        return str(e)
+        try:
+            with self.archive.open(file_path) as f:
+                return f.read().decode("utf-8")
+        except KeyError:
+            return f"File not found: {args[0]}"
 
-def cat(vfs, file_name):
-    try:
-        return vfs.read_file(file_name)
-    except Exception as e:
-        return str(e)
+    def rmdir(self, args):
+        if not args:
+            return "Usage: rmdir <directory>"
 
-def rmdir(vfs, dirname):
-    try:
-        return vfs.remove_directory(dirname)
-    except Exception as e:
-        return str(e)
+        dir_path = os.path.normpath(os.path.join(self.cwd.strip("/"), args[0])).replace("\\", "/")
 
-def head(vfs, filename, n=10):
-    try:
-        return vfs.read_head(filename, n)
-    except Exception as e:
-        return str(e)
+        entries = [entry for entry in self.archive.namelist() if entry.startswith(dir_path + "/")]
 
-# Основной цикл Shell
-def run_shell(hostname, vfs_path, log_path):
-    vfs = VirtualFileSystem(vfs_path)
+        if not entries:
+            return f"Directory not found or not empty: {args[0]}"
+
+        with TemporaryDirectory() as temp_dir:
+            temp_zip_path = os.path.join(temp_dir, "temp.zip")
+            with zipfile.ZipFile(temp_zip_path, 'w') as temp_zip:
+                for item in self.archive.infolist():
+                    if not item.filename.startswith(dir_path + "/"):
+                        with self.archive.open(item.filename) as source:
+                            temp_zip.writestr(item, source.read())
+
+            self.archive.close()
+            os.replace(temp_zip_path, self.zip_path)
+            self.archive = zipfile.ZipFile(self.zip_path, 'a')
+
+        return f"Directory removed: {args[0]}"
+
+    def head(self, args):
+        if not args:
+            return "Usage: head <file>"
+
+        file_path = os.path.normpath(os.path.join(self.cwd.strip("/"), args[0])).replace("\\", "/")
+
+        try:
+            with self.archive.open(file_path) as f:
+                lines = f.readlines()
+                return "".join(line.decode("utf-8") for line in lines[:10])
+        except KeyError:
+            return f"File not found: {args[0]}"
+
+    def exit(self):
+        return "Exiting shell..."
+
+    def get_current_path(self):
+        return self.cwd
+
+
+def run_shell(vfs_path):
+    vfs = Shell(vfs_path)
 
     def get_prompt():
         relative_path = vfs.get_relative_path()
-        return f"PS {hostname}/{relative_path}> " if relative_path != '.' else f"PS {hostname}> "
+        return f"VFS {relative_path}> " if relative_path != "/" else "beresta_home/> "
 
     def handle_command(event=None):
         full_text = terminal_output.get("end-1l linestart", "end-1c").strip()
         command = full_text.replace(get_prompt(), "").strip()
-
-        if command:
-            log_action(log_path, command)
-            output = ""
-
-            if command == "ls":
-                output = ls(vfs)
-            elif command.startswith("cd"):
-                parts = command.split(maxsplit=1)
-                output = cd(vfs, parts[1]) if len(parts) > 1 else "Please specify a directory."
-            elif command.startswith("cat"):
-                parts = command.split(maxsplit=1)
-                output = cat(vfs, parts[1]) if len(parts) > 1 else "Please specify a file."
-            elif command.startswith("rmdir"):
-                parts = command.split(maxsplit=1)
-                output = rmdir(vfs, parts[1]) if len(parts) > 1 else "Please specify a directory to remove."
-            elif command.startswith("head"):
-                parts = command.split(maxsplit=2)
-                file_name = parts[1] if len(parts) > 1 else ""
-                n = int(parts[2]) if len(parts) > 2 else 10
-                output = head(vfs, file_name, n)
-            elif command == "exit":
-                window.quit()
-                return
-            else:
-                output = "Unknown command"
-
-            terminal_output.insert(tk.END, f"\n{output}\n{get_prompt()}")
-            terminal_output.see(tk.END)
+        if command == "exit":
+            window.quit()
+        output = vfs.run_command(command)
+        terminal_output.insert(tk.END, f"\n{output}\n{get_prompt()}")
+        terminal_output.see(tk.END)
 
     window = tk.Tk()
-    window.title(f"{hostname} Shell Emulator")
+    window.title(f"beresta Shell")
 
-    terminal_output = scrolledtext.ScrolledText(window, width=80, height=20, bg='black', fg='white',
-                                                font=('Courier', 10), wrap=tk.WORD)
+    terminal_output = scrolledtext.ScrolledText(window,
+                                   width=80,
+                                   height=20,
+                                   bg='#8B4513',
+                                   fg='#F5DEB3',
+                                   font=('Courier', 10, 'bold'),
+                                   wrap=tk.WORD)
     terminal_output.grid(row=0, column=0, padx=10, pady=10)
-    terminal_output.insert(tk.END, get_prompt())
+    terminal_output.config(relief='ridge', bd=5, insertbackground='#F5DEB3')
+    terminal_output.insert(tk.INSERT, get_prompt())
     terminal_output.bind('<Return>', handle_command)
 
     window.mainloop()
 
+
 if __name__ == "__main__":
-    hostname, vfs_path, log_path = read_config('config.json')
-    run_shell(hostname, vfs_path, log_path)
+    try:
+        vfs_path = read_config('config.json')
+        run_shell(vfs_path)
+    except Exception as e:
+        print(f"Error: {e}")
